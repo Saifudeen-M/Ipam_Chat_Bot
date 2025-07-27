@@ -1,0 +1,103 @@
+**why Cortex Search is used** and **why you typically don’t directly connect your database to OpenAI**.
+
+❓ Why Not Just Use OpenAI Directly on the Database?
+
+Imagine you have a database full of structured data: books, customers, transactions, etc.
+
+You might think:
+
+“Why not just send this data to GPT and ask questions like ‘Recommend books like Harry Potter’?”
+
+Here’s why **that’s inefficient or even infeasible**:
+
+---
+
+🚧 Problem with Direct Database Querying via LLMs
+
+| Issue                     | Description                                                                                         |
+| ------------------------- | --------------------------------------------------------------------------------------------------- |
+| **Data size**             | Databases are massive. You can't dump entire tables into an LLM context (limited tokens).           |
+| **Unstructured queries**  | LLMs don’t know how to query your database unless you describe the schema, data, and relationships. |
+| **Latency & performance** | Pulling lots of data from the DB for every question is slow and costly.                             |
+| **Security & access**     | Databases often hold sensitive data; sending it to LLM APIs has risk implications.                  |
+| **Relevance**             | Not all rows are relevant. LLMs aren’t search engines; they need **curated context**.               |
+
+---
+
+✅ Why Use Snowflake Cortex Search?
+
+Cortex Search solves these problems by acting as an **intelligent retrieval layer** between your database and the LLM.
+
+### 🔍 Cortex Search Is Like a Mini Google for Your Data
+
+It:
+
+* **Indexes your data** (text columns, documents, descriptions)
+* **Uses vector search** behind the scenes
+* **Ranks and retrieves only the most relevant chunks**
+* Is **deeply integrated into Snowflake** — runs where your data lives
+
+Example:
+
+You store:
+
+```text
+Books table:
+- Title: Percy Jackson
+- Description: A story based on Greek mythology...
+- Authors: Rick Riordan
+```
+
+If a user asks:
+
+“Give me books on Greek mythology”
+
+Cortex Search:
+
+* Matches that question to relevant books (based on embedding similarity)
+* Returns chunks like:
+
+  ```
+  Document 1:
+  Title: Percy Jackson
+  Description: A story based on Greek mythology...
+  ```
+
+Then you pass **only this small chunk** to GPT, with a prompt like:
+
+> “Using the following context, answer the user’s question…”
+
+---
+
+🔑 Benefits of Using Cortex Search
+
+| Benefit         | Why it matters                                                     |
+| --------------- | ------------------------------------------------------------------ |
+| **Efficient**   | Pulls only relevant snippets, reducing token usage and cost.       |
+| **Scalable**    | Handles millions of rows or documents without overloading the LLM. |
+| **Searchable**  | Uses vector similarity (semantic search), not just keyword or SQL. |
+| **Low latency** | Runs inside Snowflake with optimized indexing.                     |
+| **Secure**      | Data stays in your Snowflake environment.                          |
+
+---
+
+🔁 RAG Architecture (Retrieval-Augmented Generation)
+
+You're basically building this architecture:
+
+```plaintext
+[User Question] → [Cortex Search (retrieves top N relevant results)] → [LLM (e.g. GPT) answers based on those results]
+```
+
+This is called **RAG**, and it's currently the **most effective way to use LLMs with your own data**.
+
+---
+
+🧠 Final Analogy
+
+* Without Cortex Search: GPT is like a genius with amnesia — you have to tell it everything before it answers.
+* With Cortex Search: You give it only **the best notes** from a smart search engine — and it uses them to generate a great answer.
+
+---
+
+Let me know if you want a visual diagram or help setting up a better prompt using Cortex search output.
