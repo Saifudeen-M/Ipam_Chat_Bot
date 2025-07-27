@@ -1,0 +1,15 @@
+This code builds a full chat API where:
+
+A user asks a question.
+
+Your app searches Snowflake Cortex for relevant content.
+
+If something is found:
+
+It builds a prompt.
+
+Sends it to OpenAI for a smart answer.
+
+If not found:
+
+Returns a fallback “Sorry” message.

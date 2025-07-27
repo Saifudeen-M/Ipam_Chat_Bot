@@ -127,3 +127,7 @@ def chat(req: ChatRequest):
     answer = get_completion(final_prompt)
 
     return {"response": answer}
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to the Book Search API! Use the /chat endpoint to ask questions about books."}
