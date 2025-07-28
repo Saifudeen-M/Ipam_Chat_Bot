@@ -5,7 +5,11 @@ from snowflake.snowpark import Session
 from snowflake.core import Root
 from dotenv import load_dotenv
 import os
+from pydantic import BaseModel, ConfigDict
 
+class MyModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    
 # Load env vars
 load_dotenv()
 
@@ -69,7 +73,8 @@ def query_cortex_search_service(query: str, limit: int = 5):
         return context_docs.strip()
 
     except Exception as e:
-        return f"❌ Error querying service: {str(e)}"
+        raise HTTPException(status_code=500, detail=f"Error querying service: {str(e)}")
+
 
 # Prompt builder
 def generate_prompt(question: str, context: str, history: list):
