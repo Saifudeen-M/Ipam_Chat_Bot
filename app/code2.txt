@@ -1,0 +1,182 @@
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from openai import OpenAI
+from snowflake.snowpark import Session
+from snowflake.core import Root
+from dotenv import load_dotenv
+import os
+import time
+import logging
+
+# Load environment variables
+load_dotenv()
+
+# OpenAI config
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+MODEL_NAME = "gpt-4o-mini"
+
+# FastAPI app setup
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Middleware for logging
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    logging.info(f"{request.method} {request.url} completed in {duration:.2f}s with status {response.status_code}")
+    return response
+
+# Snowflake session setup
+def create_snowflake_session():
+    return Session.builder.configs({
+        "account": os.getenv("SNOWFLAKE_ACCOUNT"),
+        "user": os.getenv("SNOWFLAKE_USER"),
+        "password": os.getenv("SNOWFLAKE_PASSWORD"),
+        "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE"),
+        "database": os.getenv("SNOWFLAKE_DATABASE"),
+        "schema": os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC")
+    }).create()
+
+session = create_snowflake_session()
+root = Root(session)
+
+# Cortex Search config
+CORTEX_SERVICE_NAME = "IPDATA_TEMP_SERVICE"
+CORTEX_SEARCH_COLUMNS = [
+    "CHUNK", "DISPLAYNAME", "IPV4", "PORT", "USERNAME", 
+    "USERAGENT", "TIMEZONE", "PROTOCOL", "PASSWORD", "IPV6"
+]
+
+# Pydantic request model
+class ChatRequest(BaseModel):
+    question: str
+    use_chat_history: bool = True
+    history: list = []
+
+# Query Cortex Search
+def query_cortex_search_service(query: str, limit: int = 3):
+    try:
+        cortex_service = (
+            root
+            .databases[os.getenv("SNOWFLAKE_DATABASE", "IPAM_TEMP_DB")]
+            .schemas[os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC")]
+            .cortex_search_services[CORTEX_SERVICE_NAME]
+        )
+
+        clean_query = query.strip()
+        results = cortex_service.search(
+            query=clean_query,
+            columns=CORTEX_SEARCH_COLUMNS,
+            limit=limit
+        ).results
+
+        if not results:
+            return f"❗ No results found for: {query}"
+
+        labels = {
+            "CHUNK": "Summary",
+            "DISPLAYNAME": "Display Name",
+            "IPV4": "IPv4",
+            "PORT": "Port",
+            "USERNAME": "Username",
+            "USERAGENT": "User Agent",
+            "TIMEZONE": "Time Zone",
+            "PROTOCOL": "Protocol",
+            "PASSWORD": "Password",
+            "IPV6": "IPv6"
+        }
+
+        context_docs = ""
+        for i, row in enumerate(results):
+            context_docs += f"\nEntry {i + 1}:\n"
+            for col in CORTEX_SEARCH_COLUMNS:
+                context_docs += f"{labels.get(col, col)}: {row.get(col, '')}\n"
+
+        return context_docs.strip()
+
+    except Exception as e:
+        return f"❌ Error querying service: {str(e)}"
+
+# Prompt generation
+def generate_prompt(question: str, context: str, history: list):
+    history_text = "\n".join([f"{m['role']}: {m['content']}" for m in history])
+
+    prompt = f"""
+        [INST]
+        You are **Genz**, a helpful and conversational AI assistant designed for working with IP address datasets.
+
+        ✅ You can:
+        - Answer queries about users, IP addresses, protocols, user agents, ports, etc.
+        - Engage in friendly conversation when appropriate.
+
+        🧠 For IP-related questions:
+        1. Use only the <context> below to answer.
+        2. All factual data must come from the context.
+        3. If you can’t find anything relevant, respond with:
+        "I'm sorry, I couldn't find relevant information in the IP dataset."
+
+        👤 If asked how you were created:
+        - Your name is **Genz**
+        - You were created by **Saifudeen**.
+        - You work like this:
+            🧑‍💻 User types a question → 💬 FastAPI sends to Cortex → 🔍 Cortex returns data → 🤖 GPT-4o summarizes it → 📲 User sees answer.
+
+        ---
+
+        <chat_history>
+        {history_text}
+        </chat_history>
+
+        <context>
+        {context}
+        </context>
+
+        <question>
+        {question}
+        </question>
+        [/INST]
+    """
+    return prompt
+
+# OpenAI chat completion
+def get_completion(prompt: str):
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.7,
+        max_tokens=700
+    )
+    return response.choices[0].message.content.strip()
+
+# FastAPI endpoint
+@app.post("/chat")
+def chat(req: ChatRequest):
+    if not req.question:
+        raise HTTPException(status_code=400, detail="Question is required.")
+
+    # Only use the current question for Cortex search
+    search_query = req.question.strip()
+    context = query_cortex_search_service(search_query)
+
+    if not context or context.lower().startswith("❌ error"):
+        return {
+            "response": "❗ Sorry, I couldn't find anything relevant in the IP dataset."
+        }
+
+    final_prompt = generate_prompt(req.question, context, req.history)
+    answer = get_completion(final_prompt)
+
+    return {"response": answer}

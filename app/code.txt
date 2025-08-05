@@ -1,3 +1,122 @@
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+import logging
+import time
+from snowflake.snowpark import Session
+from dotenv import load_dotenv
+import os
+
+# Load environment variables
+load_dotenv()
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+
+# FastAPI App
+app = FastAPI()
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Replace with ["http://localhost:5173"] for security in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Middleware for request logging
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    logging.info(f"{request.method} {request.url} completed in {duration:.2f}s with status {response.status_code}")
+    return response
+
+# Snowflake Session Setup
+def create_snowflake_session():
+    return Session.builder.configs({
+        "account": os.getenv("SNOWFLAKE_ACCOUNT"),
+        "user": os.getenv("SNOWFLAKE_USER"),
+        "password": os.getenv("SNOWFLAKE_PASSWORD"),
+        "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE"),
+        "database": os.getenv("SNOWFLAKE_DATABASE"),
+        "schema": os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC")
+    }).create()
+
+session = create_snowflake_session()
+
+# SQL Prompt Template
+def get_prompt_context():
+    table = "IPAM_TEMP_DB.PUBLIC.IPDATA_DATASET_RAW"
+    description = "This table contains raw IP address data from uploaded CSV logs."
+
+    df = session.sql(f"""
+        SELECT COLUMN_NAME, DATA_TYPE 
+        FROM IPAM_TEMP_DB.INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_NAME = 'IPDATA_DATASET_RAW' AND TABLE_SCHEMA = 'PUBLIC'
+    """).to_pandas()
+
+    columns = "\n".join([
+        f"- **{row['COLUMN_NAME']}**: {row['DATA_TYPE']}" for _, row in df.iterrows()
+    ])
+
+    context = f"""
+Here is the table name <tableName> {table} </tableName>
+
+<tableDescription>{description}</tableDescription>
+
+Here are the columns of {table}
+<columns>
+{columns}
+</columns>
+    """
+    return context
+
+# System Prompt Builder
+def build_prompt(question: str):
+    context = get_prompt_context()
+    base_prompt = f"""
+You will be acting as an AI Snowflake SQL Expert named Snowflake Cortex Assistant.
+Your goal is to give correct, executable sql query to users.
+
+{context}
+
+<rules>
+1. You MUST wrap the generated sql code within ```sql code markdown.
+2. Limit to 10 results unless told otherwise.
+3. Text WHERE clauses use ilike %keyword%.
+4. Only one valid SQL query.
+5. Use only columns in <columns>.
+6. Don't start SQL variables with numbers.
+7. Be concise. No text after SQL.
+</rules>
+
+Question: {question}
+Answer:
+    """
+    return base_prompt
+
+# Request Models
+class TextQuery(BaseModel):
+    question: str
+
+# Text Chat Endpoint
+@app.post("/chat")
+def chat(query: TextQuery):
+    prompt = build_prompt(query.question)
+    sql_stmt = f"""
+        SELECT SNOWFLAKE.CORTEX.ANALYZE(
+            'gpt-4o-mini', 
+            $$ {prompt} $$
+        ) AS response
+    """
+    df = session.sql(sql_stmt).to_pandas()
+    reply = df["RESPONSE"][0].strip()
+    return {"response": reply}
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -81,21 +200,26 @@ Here are the columns of {table}
     return context
 
 # Chat classifiers
+def is_greeting_only(question: str) -> bool:
+    return re.match(r"^\s*(hi|hello|hey|hallo|yo|sup)\s*$", question.strip(), re.IGNORECASE)
+
+def is_about_genz(question: str) -> bool:
+    patterns = [
+        r"\bwho\s+are\s+you\b", r"\bwhat\s+can\s+you\s+do\b",
+        r"\bwho\s+made\s+you\b", r"\bcreator\b", r"\bgenz\b", r"\bsaifudeen\b"
+    ]
+    return any(re.search(p, question.lower()) for p in patterns)
 
 # Prompt Builder
 def build_prompt(question: str) -> str:
     context = get_prompt_context()
 
-    # Detect simple greetings
-    if re.match(r"^\s*(hi|hello|hey|hallo|yo|sup)\s*$", question.strip(), re.IGNORECASE):
+    # Greeting only
+    if is_greeting_only(question):
         return "Hello! How can I assist you today?"
 
-    # Detect if user is asking about Genz
-    about_patterns = [
-        r"\bwho\s+are\s+you\b", r"\bwhat\s+can\s+you\s+do\b",
-        r"\bwho\s+made\s+you\b", r"\bcreator\b", r"\bgenz\b", r"\bsaifudeen\b"
-    ]
-    if any(re.search(p, question.lower()) for p in about_patterns):
+    # If user asks about Genz or creator
+    elif is_about_genz(question):
         return f"""
 You are **Genz**, a helpful and conversational AI assistant designed for working with IP address datasets.
 
@@ -113,8 +237,9 @@ User: {question}
 Genz:
         """
 
-    # Else, assume user needs data — build SQL-generation prompt
-    return f"""
+    # IP-related queries with SQL generation
+    else:
+        return f"""
 You are acting as an AI Snowflake SQL Expert named **Snowflake Cortex Assistant** (codename: Genz).
 Your job is to generate **correct, executable SQL queries** from user questions.
 
@@ -125,16 +250,9 @@ You are **Genz**, a helpful and conversational AI assistant designed for working
 - Engage in friendly conversation when appropriate.
 
 🧠 For IP-related questions:
-1. You MUST intelligently interpret shorthand inputs like '6051 ipv4' or 'useragent chrome'.
-2. Normalize them into full natural language before generating SQL.
-   - Examples:
-     - '6051 ipv4' → 'Can you give me IPv4 for port 6051?'
-     - 'africa timezone' → 'Can you give me timezone for africa?'
-     - 'chrome useragent' → 'Can you give me logs where useragent contains chrome?'
-
-3. Use only the <context> below to answer.
-4. All factual data must come from the context.
-5. If you can’t find anything relevant, respond with:
+1. Use only the <context> below to answer.
+2. All factual data must come from the context.
+3. If you can’t find anything relevant, respond with:
 "I'm sorry, I couldn't find relevant information in the IP dataset."
 
 {context}
@@ -152,7 +270,7 @@ You are **Genz**, a helpful and conversational AI assistant designed for working
 
 Question: {question}
 Answer:
-    """
+        """
 
 
 # Request model
@@ -188,17 +306,23 @@ def chat(query: TextQuery):
     if not query.question:
         raise HTTPException(status_code=400, detail="Question is required.")
 
+    # 👋 Direct response for greetings
+    if is_greeting_only(query.question):
+        return {"response": "Hello! How can I assist you today?"}
+
+    # 🧠 Direct response about Genz
+    if is_about_genz(query.question):
+        prompt = build_prompt(query.question)
+        llm_reply = get_completion(prompt)
+        return {"response": llm_reply.strip()}
+
+    # 🧾 Otherwise: Generate SQL
     prompt = build_prompt(query.question)
-
-    if not prompt.strip().lower().startswith("you are"):
-        return {"response": prompt.strip()}
-
-    # Otherwise, continue with LLM completion
     llm_reply = get_completion(prompt)
-    sql_code = extract_sql(llm_reply)
 
+    sql_code = extract_sql(llm_reply)
     if not sql_code:
-        return {"response": llm_reply.strip()}  
+        return {"response": "❗ Failed to generate valid SQL from the question."}
 
     try:
         rows = session.sql(sql_code).limit(10).collect()
