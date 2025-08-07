@@ -2,7 +2,7 @@ from io import BytesIO
 from tempfile import gettempdir
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from snowflake.snowpark import Session
@@ -67,6 +67,7 @@ def get_prompt_context():
         FROM IPAM_TEMP_DB.INFORMATION_SCHEMA.COLUMNS 
         WHERE TABLE_NAME = 'IPDATA_DATASET_RAW' AND TABLE_SCHEMA = 'PUBLIC'
     """).collect()
+
     columns = "\n".join([
         f"- **{row['COLUMN_NAME']}**: {row['DATA_TYPE']}" for row in rows
     ])
@@ -138,10 +139,6 @@ For IP-related questions:
 4. All factual data must come from the context.
 5. If you can’t find anything relevant, respond with:
 "I'm sorry, I couldn't find relevant information in the IP dataset."
-6. For exact matches:
-   - If the value is numeric and does **not** resemble an IP (no dots), and the user didn’t mention “IP” or “IPv4”, assume it refers to a PORT.
-   - If value matches IPv4 format (e.g. 123.45.67.89), then match against IPV4.
-   - PORT and IPV4 should **not be confused**: PORT is a number; IPV4 is a dotted string.
 
 {context}
 
@@ -198,7 +195,6 @@ def get_completion(prompt: str) -> str:
 # SQL Extractor
 def extract_sql(text: str) -> str:
     match = re.search(r"```sql(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    print("Extracted SQL:", match.group(1).strip() if match else "No SQL found")
     if match:
         sql = match.group(1).strip()
         return sql.rstrip(";").strip()
@@ -224,6 +220,7 @@ def chat(query: TextQuery):
         rows = session.sql(sql_code).limit(100).collect()
         df = pd.DataFrame([row.as_dict() for row in rows])
 
+        # Always export as CSV if user asks for excel/xlsx/export
         if any(word in query.question.lower() for word in ["excel", "xlsx", "csv", "export"]):
             csv_path = os.path.join(gettempdir(), "ip_data.csv")
             df.to_csv(csv_path, index=False)
@@ -234,6 +231,7 @@ def chat(query: TextQuery):
                 filename="ip_data.csv"
             )
 
+        # Otherwise return normal JSON
         return {"response": df.to_dict(orient="records")}
 
     except Exception as e:
